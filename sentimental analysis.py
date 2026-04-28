@@ -8,10 +8,17 @@ from collections import Counter
 # Try importing NLP libraries with error handling
 try:
     import nltk
+    from nltk.sentiment import SentimentIntensityAnalyzer
     from textblob import TextBlob
     NLP_AVAILABLE = True
 except ImportError:
     NLP_AVAILABLE = False
+
+try:
+    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer as VaderAnalyzer
+    VADER_AVAILABLE = True
+except ImportError:
+    VADER_AVAILABLE = False
 
 # Try importing visualization libraries
 try:
@@ -28,7 +35,7 @@ try:
 except ImportError:
     WORDCLOUD_AVAILABLE = False
 
-# Download NLTK data with error handling
+# Download NLTK data
 @st.cache_resource
 def download_nltk_data():
     if not NLP_AVAILABLE:
@@ -37,12 +44,23 @@ def download_nltk_data():
         nltk.download('punkt', quiet=True)
         nltk.download('averaged_perceptron_tagger', quiet=True)
         nltk.download('brown', quiet=True)
+        nltk.download('vader_lexicon', quiet=True)
         return True
     except Exception:
         return False
 
-# Initialize NLTK only if available
 nltk_success = download_nltk_data() if NLP_AVAILABLE else False
+
+# Initialize VADER
+@st.cache_resource
+def get_vader_analyzer():
+    if VADER_AVAILABLE:
+        return VaderAnalyzer()
+    elif NLP_AVAILABLE and nltk_success:
+        return SentimentIntensityAnalyzer()
+    return None
+
+vader = get_vader_analyzer()
 
 # Page configuration
 st.set_page_config(
@@ -99,98 +117,228 @@ if 'feedback_history' not in st.session_state:
 if 'total_analyses' not in st.session_state:
     st.session_state.total_analyses = 0
 
-# Simple keyword-based sentiment analysis as fallback
-def analyze_sentiment_simple(text):
-    """Simple keyword-based sentiment analysis (fallback method)"""
+# Enhanced keyword-based sentiment analysis
+def analyze_sentiment_keywords(text):
+    """Enhanced keyword-based sentiment analysis with context"""
     text_lower = text.lower()
     
-    positive_words = ['good', 'great', 'excellent', 'amazing', 'wonderful', 'fantastic', 
-                     'love', 'happy', 'pleased', 'satisfied', 'awesome', 'brilliant',
-                     'outstanding', 'perfect', 'best', 'thank', 'thanks', 'helpful',
-                     'impressive', 'recommend', 'enjoy', 'delighted', 'superb']
+    # Positive words with intensity weights
+    positive_words = {
+        'excellent': 1.0, 'amazing': 1.0, 'outstanding': 1.0, 'perfect': 0.9,
+        'brilliant': 0.9, 'fantastic': 0.9, 'wonderful': 0.9, 'superb': 0.9,
+        'great': 0.7, 'good': 0.5, 'love': 0.8, 'happy': 0.7, 'pleased': 0.6,
+        'satisfied': 0.6, 'awesome': 0.9, 'impressive': 0.8, 'recommend': 0.7,
+        'enjoy': 0.6, 'delighted': 0.8, 'thank': 0.5, 'thanks': 0.5,
+        'helpful': 0.6, 'best': 0.8, 'favorite': 0.7, 'incredible': 0.9,
+        'exceptional': 0.9, 'remarkable': 0.8, 'phenomenal': 1.0,
+        'nice': 0.4, 'decent': 0.3, 'fine': 0.2, 'okay': 0.1,
+        'well': 0.3, 'better': 0.5, 'improved': 0.6, 'smooth': 0.5,
+        'easy': 0.4, 'simple': 0.3, 'clear': 0.4, 'fast': 0.5
+    }
     
-    negative_words = ['bad', 'terrible', 'awful', 'horrible', 'poor', 'disappointed',
-                     'hate', 'worst', 'useless', 'waste', 'boring', 'slow',
-                     'broken', 'failed', 'failure', 'problem', 'issue', 'complaint',
-                     'unhappy', 'frustrated', 'angry', 'rude', 'expensive', 'overpriced']
+    # Negative words with intensity weights
+    negative_words = {
+        'terrible': -1.0, 'horrible': -1.0, 'awful': -1.0, 'disgusting': -1.0,
+        'worst': -0.9, 'hate': -0.9, 'useless': -0.9, 'pathetic': -0.9,
+        'bad': -0.5, 'poor': -0.6, 'disappointed': -0.7, 'disappointing': -0.7,
+        'boring': -0.6, 'slow': -0.5, 'broken': -0.8, 'failed': -0.8,
+        'failure': -0.8, 'problem': -0.6, 'issue': -0.5, 'complaint': -0.6,
+        'unhappy': -0.7, 'frustrated': -0.7, 'angry': -0.8, 'rude': -0.8,
+        'expensive': -0.4, 'overpriced': -0.6, 'waste': -0.7, 'never': -0.5,
+        'annoying': -0.6, 'difficult': -0.5, 'hard': -0.3, 'confusing': -0.5,
+        'ugly': -0.7, 'stupid': -0.8, 'ridiculous': -0.7, 'unacceptable': -0.8,
+        'mediocre': -0.4, 'average': -0.1, 'ok': 0.0, 'nothing': -0.2,
+        'lack': -0.3, 'missing': -0.4, 'error': -0.5, 'bug': -0.5
+    }
     
-    positive_count = sum(1 for word in positive_words if word in text_lower)
-    negative_count = sum(1 for word in negative_words if word in text_lower)
+    # Intensifiers and negations
+    intensifiers = ['very', 'really', 'extremely', 'absolutely', 'completely', 
+                   'totally', 'highly', 'so', 'quite', 'incredibly']
+    negations = ['not', 'no', "n't", 'never', 'neither', 'nor', 'hardly', 'barely']
     
-    if positive_count > negative_count:
+    words = text_lower.split()
+    total_score = 0
+    word_count = 0
+    
+    for i, word in enumerate(words):
+        # Check for negation before the word
+        negation_multiplier = 1
+        if i > 0 and words[i-1] in negations:
+            negation_multiplier = -1
+        
+        # Check for intensifier before the word
+        intensifier_multiplier = 1
+        if i > 0 and words[i-1] in intensifiers:
+            intensifier_multiplier = 1.5
+        
+        if word in positive_words:
+            total_score += positive_words[word] * negation_multiplier * intensifier_multiplier
+            word_count += 1
+        elif word in negative_words:
+            total_score += negative_words[word] * negation_multiplier * intensifier_multiplier
+            word_count += 1
+    
+    # Normalize score
+    if word_count > 0:
+        avg_score = total_score / word_count
+    else:
+        avg_score = 0
+    
+    # Determine sentiment
+    if avg_score > 0.15:
         sentiment = "Positive"
         emoji = "😊"
-        confidence = min((positive_count / max(positive_count + negative_count, 1)) * 100, 100)
-        polarity = 0.5
-    elif negative_count > positive_count:
+        confidence = min(abs(avg_score) * 100, 95)
+        polarity = min(avg_score, 0.95)
+    elif avg_score < -0.15:
         sentiment = "Negative"
         emoji = "😞"
-        confidence = min((negative_count / max(positive_count + negative_count, 1)) * 100, 100)
-        polarity = -0.5
+        confidence = min(abs(avg_score) * 100, 95)
+        polarity = max(avg_score, -0.95)
     else:
         sentiment = "Neutral"
         emoji = "😐"
-        confidence = 50
-        polarity = 0
+        confidence = 50 + (abs(avg_score) * 30)
+        polarity = avg_score
     
     return {
         'sentiment': sentiment,
         'emoji': emoji,
-        'polarity': polarity,
-        'subjectivity': 0.5,
+        'polarity': round(polarity, 3),
+        'subjectivity': min(word_count / max(len(words), 1), 0.9),
         'confidence': round(confidence, 2)
     }
 
+# VADER Analysis (better for short texts)
+def analyze_sentiment_vader(text):
+    """Analyze sentiment using VADER"""
+    if vader:
+        scores = vader.polarity_scores(text)
+        compound = scores['compound']
+        
+        # VADER compound score ranges from -1 to 1
+        if compound >= 0.05:
+            sentiment = "Positive"
+            emoji = "😊"
+            confidence = min(abs(compound) * 100, 95)
+        elif compound <= -0.05:
+            sentiment = "Negative"
+            emoji = "😞"
+            confidence = min(abs(compound) * 100, 95)
+        else:
+            sentiment = "Neutral"
+            emoji = "😐"
+            confidence = 50 - (abs(compound) * 30)
+        
+        return {
+            'sentiment': sentiment,
+            'emoji': emoji,
+            'polarity': round(compound, 3),
+            'subjectivity': (scores['pos'] + scores['neg']) / max(scores['neu'], 0.1),
+            'confidence': round(confidence, 2)
+        }
+    return analyze_sentiment_keywords(text)
+
+# TextBlob Analysis
 def analyze_sentiment_textblob(text):
     """Analyze sentiment using TextBlob"""
-    blob = TextBlob(text)
-    polarity = blob.sentiment.polarity
-    subjectivity = blob.sentiment.subjectivity
-    
-    if polarity > 0.1:
-        sentiment = "Positive"
-        emoji = "😊"
-        confidence = min(abs(polarity) * 100, 100)
-    elif polarity < -0.1:
-        sentiment = "Negative"
-        emoji = "😞"
-        confidence = min(abs(polarity) * 100, 100)
-    else:
-        sentiment = "Neutral"
-        emoji = "😐"
-        confidence = 100 - (abs(polarity) * 100)
-    
-    return {
-        'sentiment': sentiment,
-        'emoji': emoji,
-        'polarity': polarity,
-        'subjectivity': subjectivity,
-        'confidence': round(confidence, 2)
-    }
+    try:
+        blob = TextBlob(text)
+        polarity = blob.sentiment.polarity
+        subjectivity = blob.sentiment.subjectivity
+        
+        if polarity > 0.15:
+            sentiment = "Positive"
+            emoji = "😊"
+            confidence = min(abs(polarity) * 100, 95)
+        elif polarity < -0.15:
+            sentiment = "Negative"
+            emoji = "😞"
+            confidence = min(abs(polarity) * 100, 95)
+        else:
+            sentiment = "Neutral"
+            emoji = "😐"
+            confidence = 50 + (abs(polarity) * 30)
+        
+        return {
+            'sentiment': sentiment,
+            'emoji': emoji,
+            'polarity': round(polarity, 3),
+            'subjectivity': round(subjectivity, 3),
+            'confidence': round(confidence, 2)
+        }
+    except Exception:
+        return analyze_sentiment_keywords(text)
 
-# Choose analysis method
+# Ensemble analysis (combine multiple methods)
 def analyze_sentiment(text):
-    """Main sentiment analysis function with fallback"""
-    if NLP_AVAILABLE and nltk_success:
+    """Main sentiment analysis using ensemble of methods"""
+    # Get results from different methods
+    vader_result = analyze_sentiment_vader(text)
+    
+    if NLP_AVAILABLE:
         try:
-            return analyze_sentiment_textblob(text)
+            textblob_result = analyze_sentiment_textblob(text)
+            
+            # Ensemble: average the results
+            avg_polarity = (vader_result['polarity'] + textblob_result['polarity']) / 2
+            avg_subjectivity = (vader_result['subjectivity'] + textblob_result['subjectivity']) / 2
+            avg_confidence = (vader_result['confidence'] + textblob_result['confidence']) / 2
+            
+            # Determine final sentiment
+            if avg_polarity > 0.1:
+                sentiment = "Positive"
+                emoji = "😊"
+                confidence = min(avg_confidence, 95)
+            elif avg_polarity < -0.1:
+                sentiment = "Negative"
+                emoji = "😞"
+                confidence = min(avg_confidence, 95)
+            else:
+                sentiment = "Neutral"
+                emoji = "😐"
+                confidence = 50 + (abs(avg_polarity) * 20)
+            
+            return {
+                'sentiment': sentiment,
+                'emoji': emoji,
+                'polarity': round(avg_polarity, 3),
+                'subjectivity': round(avg_subjectivity, 3),
+                'confidence': round(confidence, 2),
+                'vader_score': vader_result['polarity'],
+                'textblob_score': textblob_result['polarity']
+            }
         except Exception:
-            return analyze_sentiment_simple(text)
+            return vader_result
     else:
-        return analyze_sentiment_simple(text)
+        return vader_result
 
 def extract_keywords(text):
-    """Extract keywords from text"""
+    """Extract keywords with emotions"""
+    emotions = {
+        'happy': '😊', 'sad': '😢', 'angry': '😠', 'love': '❤️',
+        'great': '👍', 'bad': '👎', 'amazing': '✨', 'terrible': '💔',
+        'good': '✅', 'poor': '❌', 'excellent': '🌟', 'awful': '😱'
+    }
+    
     words = re.findall(r'\b\w+\b', text.lower())
     stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 
                   'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
                   'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
                   'should', 'may', 'might', 'can', 'i', 'you', 'he', 'she', 'it', 'we',
                   'they', 'me', 'him', 'her', 'us', 'them', 'my', 'your', 'his', 'its',
-                  'our', 'their', 'this', 'that', 'these', 'those', 'am', 'very', 'really'}
+                  'our', 'their', 'this', 'that', 'these', 'those', 'am'}
     
     keywords = [word for word in words if word not in stop_words and len(word) > 2]
-    return Counter(keywords).most_common(10)
+    word_counts = Counter(keywords).most_common(15)
+    
+    # Add emotion emojis if available
+    enhanced_keywords = []
+    for word, count in word_counts:
+        em = emotions.get(word, '')
+        enhanced_keywords.append((f"{em} {word}" if em else word, count))
+    
+    return enhanced_keywords
 
 def generate_wordcloud(feedback_list):
     """Generate word cloud from feedback"""
@@ -210,7 +358,7 @@ def generate_wordcloud(feedback_list):
         return None
 
 # Main Header
-st.markdown('<div class="main-header"><h1>🎯 Customer Feedback Sentiment Analysis</h1><p>AI-Powered Real-Time Feedback Classification System</p></div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header"><h1>🎯 Customer Feedback Sentiment Analysis</h1><p>Multi-Model AI-Powered Feedback Classification System</p></div>', unsafe_allow_html=True)
 
 # Sidebar
 with st.sidebar:
@@ -248,11 +396,28 @@ with st.sidebar:
     
     st.markdown("---")
     st.markdown("### 🔧 System Status")
-    if NLP_AVAILABLE and nltk_success:
-        st.success("✅ Advanced NLP Active")
+    if vader:
+        st.success("✅ VADER Active (Best accuracy)")
+    elif NLP_AVAILABLE and nltk_success:
+        st.success("✅ NLP Active")
     else:
-        st.warning("⚡ Basic NLP Mode")
-        st.info("Using keyword-based analysis")
+        st.warning("⚡ Enhanced Keyword Mode")
+    
+    # Example feedbacks
+    st.markdown("---")
+    st.subheader("🧪 Test Examples")
+    st.caption("Click to copy example feedbacks")
+    examples = [
+        "This product is absolutely amazing! Best purchase ever!",
+        "The service was terrible, very disappointed with the quality.",
+        "It's okay, nothing special but gets the job done.",
+        "I love this! Excellent customer support and fast delivery.",
+        "Waste of money, broken on arrival. Very frustrating experience.",
+        "Average product, decent quality for the price."
+    ]
+    for ex in examples:
+        if st.button(ex[:80] + "...", key=ex[:20]):
+            st.session_state.example_feedback = ex
 
 # Main Content Area
 if analysis_mode == "🎯 Single Analysis":
@@ -261,18 +426,21 @@ if analysis_mode == "🎯 Single Analysis":
     col1, col2 = st.columns([2, 1])
     
     with col1:
+        # Use example if selected
+        default_text = st.session_state.get('example_feedback', '')
         feedback_text = st.text_area(
             "Enter Customer Feedback:",
             placeholder="Type or paste customer feedback here...",
             height=150,
-            key="single_feedback"
+            key="single_feedback",
+            value=default_text
         )
         
         customer_name = st.text_input("Customer Name (Optional):", placeholder="Enter name...")
         
         if st.button("🔍 Analyze Sentiment", type="primary", use_container_width=True):
             if feedback_text.strip():
-                with st.spinner("Analyzing sentiment..."):
+                with st.spinner("Analyzing with multiple models..."):
                     result = analyze_sentiment(feedback_text)
                     keywords = extract_keywords(feedback_text)
                     
@@ -300,7 +468,7 @@ if analysis_mode == "🎯 Single Analysis":
                         bg_color = '#d4edda' if result['sentiment'] == 'Positive' else '#f8d7da' if result['sentiment'] == 'Negative' else '#fff3cd'
                         st.markdown(f"""
                             <div class="metric-card" style="background-color: {bg_color}">
-                                <h3>Sentiment</h3>
+                                <h3>Overall Sentiment</h3>
                                 <div class="emoji-large">{result['emoji']}</div>
                                 <h2 style="color: {sentiment_color};">{result['sentiment']}</h2>
                             </div>
@@ -309,7 +477,7 @@ if analysis_mode == "🎯 Single Analysis":
                     with res_col2:
                         st.markdown(f"""
                             <div class="metric-card" style="background-color: #e7f3ff;">
-                                <h3>Confidence</h3>
+                                <h3>Confidence Score</h3>
                                 <div style="font-size: 48px;">📊</div>
                                 <h2>{result['confidence']}%</h2>
                             </div>
@@ -324,12 +492,27 @@ if analysis_mode == "🎯 Single Analysis":
                             </div>
                         """, unsafe_allow_html=True)
                     
-                    # Simple progress bar for polarity
+                    # Show model scores if available
+                    if 'vader_score' in result and 'textblob_score' in result:
+                        st.markdown("---")
+                        st.subheader("🔬 Individual Model Scores")
+                        model_col1, model_col2, model_col3 = st.columns(3)
+                        
+                        with model_col1:
+                            st.metric("VADER Score", f"{result['vader_score']:.3f}", 
+                                     delta="Best for social media")
+                        
+                        with model_col2:
+                            st.metric("TextBlob Score", f"{result['textblob_score']:.3f}",
+                                     delta="Best for paragraphs")
+                        
+                        with model_col3:
+                            st.metric("Ensemble Score", f"{result['polarity']:.3f}",
+                                     delta="Combined result")
+                    
+                    # Polarity gauge
                     st.markdown("---")
-                    st.subheader("📈 Sentiment Polarity")
-                    polarity_normalized = (result['polarity'] + 1) / 2  # Convert -1 to 1 range to 0 to 1
-                    st.progress(polarity_normalized)
-                    st.caption(f"Polarity Score: {result['polarity']:.2f} (-1 = Negative, 0 = Neutral, 1 = Positive)")
+                    st.subheader("📈 Sentiment Polarity Meter")
                     
                     if PLOTLY_AVAILABLE:
                         fig = go.Figure(go.Indicator(
@@ -339,48 +522,79 @@ if analysis_mode == "🎯 Single Analysis":
                             title = {'text': "Polarity Score (-1 to 1)"},
                             delta = {'reference': 0},
                             gauge = {
-                                'axis': {'range': [-1, 1]},
+                                'axis': {'range': [-1, 1], 'tickwidth': 1},
                                 'bar': {'color': "darkblue"},
                                 'steps': [
-                                    {'range': [-1, -0.1], 'color': "#dc3545"},
+                                    {'range': [-1, -0.5], 'color': "#dc3545"},
+                                    {'range': [-0.5, -0.1], 'color': "#ff6b6b"},
                                     {'range': [-0.1, 0.1], 'color': "#ffc107"},
-                                    {'range': [0.1, 1], 'color': "#28a745"}
-                                ]
+                                    {'range': [0.1, 0.5], 'color': "#51cf66"},
+                                    {'range': [0.5, 1], 'color': "#28a745"}
+                                ],
+                                'threshold': {
+                                    'line': {'color': "red", 'width': 4},
+                                    'thickness': 0.75,
+                                    'value': result['polarity']
+                                }
                             }
                         ))
+                        fig.update_layout(height=300)
                         st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        # Simple progress bar
+                        polarity_normalized = (result['polarity'] + 1) / 2
+                        st.progress(polarity_normalized)
+                        color = "green" if result['polarity'] > 0.1 else "red" if result['polarity'] < -0.1 else "orange"
+                        st.markdown(f"**Polarity Score:** :{color}[{result['polarity']:.3f}]")
                     
+                    # Keywords
                     if keywords:
                         st.markdown("---")
-                        st.subheader("🏷️ Key Terms")
+                        st.subheader("🏷️ Key Terms & Emotions")
                         cols = st.columns(5)
-                        for i, (word, count) in enumerate(keywords[:5]):
+                        for i, (word, count) in enumerate(keywords[:10]):
                             with cols[i % 5]:
-                                st.metric(f"#{i+1}", word.capitalize(), count)
+                                st.metric(f"#{i+1}", word, count)
                     
-                    st.success("✅ Analysis complete and saved to history!")
+                    st.success("✅ Analysis complete with ensemble methods!")
             else:
                 st.warning("⚠️ Please enter feedback text to analyze.")
     
     with col2:
         st.info("""
-        ### 💡 How it works
+        ### 💡 Detection Methods Used
         
-        Our AI analyzes:
-        - 😊 **Polarity**: Positive/negative tone
-        - 🎯 **Subjectivity**: Factual vs. opinion
-        - 📊 **Confidence**: Analysis reliability
+        **Multi-Model Ensemble:**
+        1. 🎯 **VADER** - Best for short social media texts
+        2. 📚 **TextBlob** - Good for longer paragraphs
+        3. 🔤 **Keyword Analysis** - Context-aware fallback
         
-        ### 🎨 Reaction Scale
+        ### 🎨 Classification Scale
         - **😊 Positive**: Polarity > 0.1
-        - **😐 Neutral**: -0.1 to 0.1
+        - **😐 Neutral**: -0.1 to 0.1  
         - **😞 Negative**: Polarity < -0.1
         
-        ### ✨ Tips
-        - Use detailed feedback
-        - Include emotions
-        - Be specific
+        ### ✨ Features
+        - Negation detection ("not good" ≠ "good")
+        - Intensity modifiers ("very bad" > "bad")
+        - Context-aware analysis
         """)
+        
+        # Quick test examples
+        st.markdown("---")
+        st.subheader("🧪 Quick Test")
+        test_texts = {
+            "Strong Positive": "I absolutely love this! Best experience ever!",
+            "Mild Positive": "It's pretty good, I'm satisfied with it.",
+            "Neutral": "The product arrived today. It is what I ordered.",
+            "Mild Negative": "Not great, could be better.",
+            "Strong Negative": "Terrible experience! Worst product ever!"
+        }
+        
+        for label, text in test_texts.items():
+            if st.button(f"Test: {label}", key=label):
+                result = analyze_sentiment(text)
+                st.success(f"Result: {result['emoji']} {result['sentiment']} ({result['confidence']}% confidence)")
 
 elif analysis_mode == "📝 Batch Analysis":
     st.header("Batch Feedback Analysis")
@@ -400,7 +614,7 @@ elif analysis_mode == "📝 Batch Analysis":
                 feedbacks = [line.strip() for line in batch_text.split('\n') if line.strip()]
                 
                 if feedbacks:
-                    with st.spinner(f"Analyzing {len(feedbacks)} feedbacks..."):
+                    with st.spinner(f"Analyzing {len(feedbacks)} feedbacks with ensemble methods..."):
                         results = []
                         for feedback in feedbacks:
                             result = analyze_sentiment(feedback)
@@ -449,7 +663,6 @@ elif analysis_mode == "📝 Batch Analysis":
                                 )
                                 st.plotly_chart(fig, use_container_width=True)
                             else:
-                                # Simple bar chart as fallback
                                 st.bar_chart(sentiment_counts)
                         
                         with chart_col2:
@@ -477,17 +690,17 @@ elif analysis_mode == "📝 Batch Analysis":
     
     with col2:
         st.info("""
-        ### 📝 Batch Guidelines
+        ### 📝 Batch Analysis Tips
         
         - One feedback per line
-        - Empty lines will be ignored
-        - Each line treated as separate feedback
+        - Empty lines ignored
+        - Each line gets ensemble analysis
         
-        ### 📊 What you get:
-        - Individual analysis
+        ### 📊 Results Include:
+        - Individual sentiment scores
         - Distribution charts
-        - Overall sentiment
-        - Confidence scores
+        - Confidence levels
+        - Exportable data
         """)
 
 else:  # View History
@@ -496,6 +709,7 @@ else:  # View History
     if st.session_state.feedback_history:
         df_history = pd.DataFrame(st.session_state.feedback_history)
         
+        # Filters
         col1, col2, col3 = st.columns(3)
         with col1:
             sentiment_filter = st.multiselect(
@@ -510,16 +724,25 @@ else:  # View History
                 customer_filter = st.selectbox("Filter by Customer:", customers)
         
         with col3:
-            sort_by = st.selectbox(
-                "Sort by:",
-                options=["Timestamp", "Confidence", "Polarity"],
-                index=0
-            )
+            if len(df_history) > 0:
+                min_conf = float(df_history['confidence'].min())
+                max_conf = float(df_history['confidence'].max())
+                confidence_range = st.slider(
+                    "Min Confidence %:",
+                    min_value=0.0,
+                    max_value=100.0,
+                    value=0.0,
+                    step=5.0
+                )
         
+        # Apply filters
         filtered_df = df_history[df_history['sentiment'].isin(sentiment_filter)]
         if 'customer' in filtered_df.columns and 'customer_filter' in locals() and customer_filter != 'All':
             filtered_df = filtered_df[filtered_df['customer'] == customer_filter]
+        if 'confidence_range' in locals():
+            filtered_df = filtered_df[filtered_df['confidence'] >= confidence_range]
         
+        # Statistics
         st.markdown("---")
         stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
         
@@ -538,6 +761,7 @@ else:  # View History
             negative_count = len(filtered_df[filtered_df['sentiment'] == 'Negative'])
             st.metric("😞 Negative", negative_count)
         
+        # Charts
         st.markdown("---")
         chart_col1, chart_col2 = st.columns(2)
         
@@ -582,6 +806,7 @@ else:  # View History
             else:
                 st.info("Install plotly for advanced charts")
         
+        # Word Cloud
         st.markdown("---")
         st.subheader("☁️ Feedback Word Cloud")
         wordcloud_fig = generate_wordcloud(st.session_state.feedback_history)
@@ -590,6 +815,7 @@ else:  # View History
         else:
             st.info("Install wordcloud for this visualization")
         
+        # Feedback list
         st.markdown("---")
         st.subheader("📋 Feedback Details")
         
@@ -616,7 +842,7 @@ else:  # View History
 st.markdown("---")
 st.markdown("""
     <div style="text-align: center; color: #666;">
-        <p>🎯 Sentiment Analysis Dashboard | Powered by NLP & Machine Learning</p>
-        <p>Built with Streamlit • TextBlob • Plotly</p>
+        <p>🎯 Enhanced Sentiment Analysis Dashboard | Multi-Model Ensemble System</p>
+        <p>Powered by VADER • TextBlob • Enhanced Keyword Analysis</p>
     </div>
 """, unsafe_allow_html=True)
